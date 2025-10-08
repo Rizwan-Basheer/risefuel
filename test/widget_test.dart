@@ -5,26 +5,45 @@
 // gestures. You can also use WidgetTester to find child widgets in the widget
 // tree, read text, and verify that the values of widget properties are correct.
 
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:risefuel/core/utils/date_helper.dart';
+import 'package:risefuel/data/local/quotes_local_data.dart';
+import 'package:risefuel/data/models/quote_model.dart';
 import 'package:risefuel/main.dart';
+import 'package:risefuel/viewmodel/quotes_viewmodel.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  TestWidgetsFlutterBinding.ensureInitialized();
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+  testWidgets('DailyQuotesApp displays the daily quote', (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    final prefs = await SharedPreferences.getInstance();
+    final viewModel = QuotesViewModel(
+      localData: _FakeQuotesLocalData(),
+      sharedPreferences: prefs,
+      dateHelper: const DateHelper(),
+    );
+    await viewModel.initialize();
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
+    await tester.pumpWidget(DailyQuotesApp(viewModel: viewModel));
+    await tester.pumpAndSettle();
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    expect(find.text('Quote of the Day'), findsOneWidget);
+    expect(find.textContaining('Test quote for UI'), findsOneWidget);
+    expect(find.textContaining('— Test Author'), findsOneWidget);
   });
+}
+
+class _FakeQuotesLocalData extends QuotesLocalData {
+  @override
+  Future<List<QuoteModel>> loadQuotes() async {
+    return <QuoteModel>[
+      QuoteModel(
+        text: 'Test quote for UI rendering in widget test.',
+        author: 'Test Author',
+      ),
+    ];
+  }
 }
