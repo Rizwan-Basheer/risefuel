@@ -13,9 +13,15 @@ class QuoteModel {
       '${Uri.encodeComponent(text)}|${Uri.encodeComponent(author)}';
 
   factory QuoteModel.fromJson(Map<String, dynamic> json) {
+    final dynamic rawText = json['text'] ?? json['q'];
+    final dynamic rawAuthor = json['author'] ?? json['a'];
+    final text = (rawText is String ? rawText : rawText?.toString() ?? '').trim();
+    final authorCandidate =
+        (rawAuthor is String ? rawAuthor : rawAuthor?.toString() ?? '').trim();
+    final author = authorCandidate.isEmpty ? 'Unknown' : authorCandidate;
     return QuoteModel(
-      text: json['text'] as String? ?? '',
-      author: json['author'] as String? ?? 'Unknown',
+      text: text,
+      author: author,
     );
   }
 
@@ -49,4 +55,3 @@ class QuoteModel {
   @override
   String toString() => jsonEncode(toJson());
 }
-

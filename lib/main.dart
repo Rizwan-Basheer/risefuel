@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'core/constants/app_colors.dart';
 import 'core/utils/date_helper.dart';
 import 'data/local/quotes_local_data.dart';
+import 'data/remote/quotes_api.dart';
 import 'viewmodel/quotes_viewmodel.dart';
 import 'ui/screens/home_screen.dart';
 
@@ -14,6 +15,7 @@ Future<void> main() async {
   final sharedPreferences = await SharedPreferences.getInstance();
   final viewModel = QuotesViewModel(
     localData: QuotesLocalData(),
+    remoteData: QuotesApi(),
     sharedPreferences: sharedPreferences,
     dateHelper: const DateHelper(),
   );

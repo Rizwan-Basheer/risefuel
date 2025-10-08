@@ -36,7 +36,6 @@ class QuoteCard extends StatelessWidget {
       ),
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
       child: Column(
-        mainAxisSize: MainAxisSize.min,
         children: <Widget>[
           const Icon(
             Icons.format_quote,
@@ -44,20 +43,29 @@ class QuoteCard extends StatelessWidget {
             color: Colors.white70,
           ),
           const SizedBox(height: 12),
-          AnimatedSwitcher(
-            duration: const Duration(milliseconds: 350),
-            transitionBuilder: (child, animation) =>
-                FadeTransition(opacity: animation, child: child),
-            child: Text(
-              quote.text,
-              key: ValueKey<String>(quote.text),
-              textAlign: TextAlign.center,
-              style: AppTextStyles.quote(context).copyWith(
-                color: Colors.white,
+          Expanded(
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 350),
+              transitionBuilder: (child, animation) =>
+                  FadeTransition(opacity: animation, child: child),
+              child: Scrollbar(
+                thumbVisibility: false,
+                child: SingleChildScrollView(
+                  key: ValueKey<String>(quote.text),
+                  physics: const BouncingScrollPhysics(),
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: Text(
+                    quote.text,
+                    textAlign: TextAlign.center,
+                    style: AppTextStyles.quote(context).copyWith(
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
               ),
             ),
           ),
-          const SizedBox(height: 24),
+          const SizedBox(height: 16),
           Align(
             alignment: Alignment.centerRight,
             child: Text(

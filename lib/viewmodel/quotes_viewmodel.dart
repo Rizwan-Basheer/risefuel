@@ -1,4 +1,4 @@
-import 'dart:math';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -6,106 +6,177 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../core/utils/date_helper.dart';
 import '../data/local/quotes_local_data.dart';
 import '../data/models/quote_model.dart';
+import '../data/remote/quotes_api.dart';
 
 class QuotesViewModel extends ChangeNotifier {
   QuotesViewModel({
     required this.localData,
+    required this.remoteData,
     required this.sharedPreferences,
     required this.dateHelper,
   });
 
   final QuotesLocalData localData;
+  final QuotesApi remoteData;
   final SharedPreferences sharedPreferences;
   final DateHelper dateHelper;
 
-  static const String _favoritesKey = 'favorite_quotes_v1';
-  static const String _lastQuoteIdKey = 'last_quote_id';
-  static const String _lastQuoteDayKey = 'last_quote_day';
+  static const String _quotesCacheKey = 'cached_quotes_v1';
+  static const String _quoteOfDayKey = 'cached_quote_of_day_v1';
+  static const String _favoritesKey = 'favorite_quotes_v2';
+  static const String _legacyFavoriteIdsKey = 'favorite_quotes_v1';
+  static const String _lastFetchDayKey = 'last_fetch_day_v1';
+  static const String _currentIndexKey = 'current_index_v1';
   static const String _themeModeKey = 'theme_mode';
 
-  final Random _random = Random();
-
   List<QuoteModel> _quotes = <QuoteModel>[];
-  QuoteModel? _currentQuote;
-  Set<String> _favoriteIds = <String>{};
-  bool _isLoading = true;
+  QuoteModel? _quoteOfDay;
+  Map<String, QuoteModel> _favoriteQuotes = <String, QuoteModel>{};
+  int _currentIndex = 0;
+  bool _isLoading = false;
   String? _error;
   ThemeMode _themeMode = ThemeMode.system;
+  bool _hasInitialized = false;
 
   bool get isLoading => _isLoading;
   String? get error => _error;
-  QuoteModel? get currentQuote => _currentQuote;
   ThemeMode get themeMode => _themeMode;
-  List<QuoteModel> get favoriteQuotes =>
-      _quotes.where((quote) => _favoriteIds.contains(quote.storageId)).toList();
+  List<QuoteModel> get quotes => List<QuoteModel>.unmodifiable(_quotes);
+  QuoteModel? get quoteOfDay => _quoteOfDay;
+  int get currentIndex => _currentIndex;
+  QuoteModel? get currentQuote => _quotes.isEmpty
+      ? null
+      : _quotes[_currentIndex.clamp(0, _quotes.length - 1)];
 
-  bool isFavorite(QuoteModel quote) => _favoriteIds.contains(quote.storageId);
+  List<QuoteModel> get favoriteQuotes =>
+      List<QuoteModel>.unmodifiable(_favoriteQuotes.values);
+
+  bool isFavorite(QuoteModel quote) =>
+      _favoriteQuotes.containsKey(quote.storageId);
+
+  bool get canGoNext => _currentIndex < _quotes.length - 1;
+  bool get canGoPrevious => _currentIndex > 0;
 
   Future<void> initialize({bool forceRefresh = false}) async {
-    if (_quotes.isNotEmpty && !forceRefresh) {
-      return;
+    if (!_hasInitialized || forceRefresh) {
+      await _restoreState();
+      _hasInitialized = true;
     }
+    if (forceRefresh || _shouldRefreshDaily()) {
+      await fetchLatestQuotes(force: true);
+    }
+  }
+
+  Future<void> _restoreState() async {
     _setLoading(true);
     try {
-      _quotes = await localData.loadQuotes();
-      _favoriteIds =
-          sharedPreferences.getStringList(_favoritesKey)?.toSet() ?? <String>{};
-      _themeMode = _restoreThemeMode();
+      await _restoreThemeMode();
+      await _restoreCachedQuotes();
+      await _restoreFavorites();
 
-      final savedDay = sharedPreferences.getString(_lastQuoteDayKey);
-      final savedQuoteId = sharedPreferences.getString(_lastQuoteIdKey);
+      _currentIndex =
+          sharedPreferences.getInt(_currentIndexKey) ?? _currentIndex;
+      _ensureCurrentIndexBounds();
 
-      if (savedDay != null &&
-          savedQuoteId != null &&
-          dateHelper.isSameDayKey(savedDay)) {
-        _currentQuote = _quotes.firstWhere(
-          (quote) => quote.storageId == savedQuoteId,
-          orElse: () => _pickRandomQuote(),
-        );
-      } else {
-        _currentQuote = _pickRandomQuote();
-        await _persistDailyQuote(_currentQuote!);
+      if (_quotes.isEmpty) {
+        _quotes = await localData.loadQuotes();
       }
+      _quoteOfDay ??= _quotes.isNotEmpty ? _quotes.first : null;
       _error = null;
     } catch (_) {
-      _error = 'Unable to load quotes. Please try again later.';
+      if (_quotes.isEmpty) {
+        _error =
+            'Unable to load quotes. Please check your connection and try again.';
+      }
     } finally {
       _setLoading(false);
     }
   }
 
-  Future<void> refreshQuote() async {
-    if (_quotes.isEmpty) {
-      await initialize(forceRefresh: true);
+  Future<void> fetchLatestQuotes({bool force = false}) async {
+    if (!force && !_shouldRefreshDaily()) {
       return;
     }
-    final previousId = _currentQuote?.storageId;
-    QuoteModel next = _pickRandomQuote();
-    if (_quotes.length > 1) {
-      for (int i = 0; i < 5 && next.storageId == previousId; i++) {
-        next = _pickRandomQuote();
+    _setLoading(true);
+    try {
+      final QuoteModel? latestOfDay = await remoteData.fetchQuoteOfDay();
+      final List<QuoteModel> fetchedQuotes = await remoteData.fetchQuotes();
+
+      if (fetchedQuotes.isNotEmpty) {
+        _quotes = fetchedQuotes;
       }
+      if (latestOfDay != null) {
+        _quoteOfDay = latestOfDay;
+        final bool contains =
+            _quotes.any((quote) => quote.storageId == latestOfDay.storageId);
+        if (!contains) {
+          _quotes = <QuoteModel>[latestOfDay, ..._quotes];
+        }
+      } else if (_quoteOfDay == null && _quotes.isNotEmpty) {
+        _quoteOfDay = _quotes.first;
+      }
+      _currentIndex = 0;
+      await _persistQuotes();
+      await _persistQuoteOfDay();
+      await _persistCurrentIndex();
+      await sharedPreferences.setString(
+        _lastFetchDayKey,
+        dateHelper.dayKey(),
+      );
+      _error = null;
+    } catch (_) {
+      if (_quotes.isEmpty) {
+        _error =
+            'Unable to fetch quotes right now. Please try again later.';
+      } else {
+        _error ??=
+            'Showing saved quotes. We could not contact the quotes service.';
+      }
+    } finally {
+      _setLoading(false);
     }
-    _currentQuote = next;
-    await _persistDailyQuote(next);
-    notifyListeners();
   }
 
   void toggleFavorite(QuoteModel quote) {
     final id = quote.storageId;
-    if (_favoriteIds.contains(id)) {
-      _favoriteIds.remove(id);
+    if (_favoriteQuotes.containsKey(id)) {
+      _favoriteQuotes.remove(id);
     } else {
-      _favoriteIds.add(id);
+      _favoriteQuotes[id] = quote;
     }
     _persistFavorites();
     notifyListeners();
   }
 
   void removeFavorite(QuoteModel quote) {
-    if (_favoriteIds.remove(quote.storageId)) {
+    if (_favoriteQuotes.remove(quote.storageId) != null) {
       _persistFavorites();
       notifyListeners();
+    }
+  }
+
+  void setCurrentIndex(int index) {
+    if (_quotes.isEmpty) {
+      return;
+    }
+    final int nextIndex = index.clamp(0, _quotes.length - 1);
+    if (nextIndex == _currentIndex) {
+      return;
+    }
+    _currentIndex = nextIndex;
+    _persistCurrentIndex();
+    notifyListeners();
+  }
+
+  void goToNextQuote() {
+    if (canGoNext) {
+      setCurrentIndex(_currentIndex + 1);
+    }
+  }
+
+  void goToPreviousQuote() {
+    if (canGoPrevious) {
+      setCurrentIndex(_currentIndex - 1);
     }
   }
 
@@ -120,42 +191,137 @@ class QuotesViewModel extends ChangeNotifier {
     notifyListeners();
   }
 
-  ThemeMode _restoreThemeMode() {
+  bool _shouldRefreshDaily() {
+    final String todayKey = dateHelper.dayKey();
+    final String? stored = sharedPreferences.getString(_lastFetchDayKey);
+    return stored == null || stored != todayKey;
+  }
+
+  Future<void> _restoreThemeMode() async {
     final stored = sharedPreferences.getString(_themeModeKey);
     if (stored == null) {
-      return ThemeMode.system;
+      _themeMode = ThemeMode.system;
+      return;
     }
-    return ThemeMode.values.firstWhere(
+    _themeMode = ThemeMode.values.firstWhere(
       (mode) => mode.name == stored,
       orElse: () => ThemeMode.system,
     );
   }
 
-  QuoteModel _pickRandomQuote() {
-    if (_quotes.isEmpty) {
-      return QuoteModel(text: 'No quotes available', author: 'Unknown');
+  Future<void> _restoreCachedQuotes() async {
+    final String? storedQuotes = sharedPreferences.getString(_quotesCacheKey);
+    if (storedQuotes != null && storedQuotes.isNotEmpty) {
+      final dynamic data = jsonDecode(storedQuotes);
+      if (data is List) {
+        _quotes = data
+            .whereType<Map<String, dynamic>>()
+            .map(QuoteModel.fromJson)
+            .toList();
+      }
     }
-    return _quotes[_random.nextInt(_quotes.length)];
+    final String? storedQuoteOfDay =
+        sharedPreferences.getString(_quoteOfDayKey);
+    if (storedQuoteOfDay != null && storedQuoteOfDay.isNotEmpty) {
+      final dynamic parsed = jsonDecode(storedQuoteOfDay);
+      if (parsed is Map<String, dynamic>) {
+        _quoteOfDay = QuoteModel.fromJson(parsed);
+      }
+    }
   }
 
-  Future<void> _persistDailyQuote(QuoteModel quote) async {
-    await sharedPreferences.setString(_lastQuoteIdKey, quote.storageId);
+  Future<void> _restoreFavorites() async {
+    final String? storedFavorites =
+        sharedPreferences.getString(_favoritesKey);
+    if (storedFavorites != null && storedFavorites.isNotEmpty) {
+      final dynamic data = jsonDecode(storedFavorites);
+      if (data is List) {
+        final Map<String, QuoteModel> stored = <String, QuoteModel>{};
+        for (final Map<String, dynamic> item
+            in data.whereType<Map<String, dynamic>>()) {
+          final quote = QuoteModel.fromJson(item);
+          stored[quote.storageId] = quote;
+        }
+        _favoriteQuotes = stored;
+      }
+      return;
+    }
+
+    final List<String>? legacyIds =
+        sharedPreferences.getStringList(_legacyFavoriteIdsKey);
+    if (legacyIds != null && legacyIds.isNotEmpty) {
+      final Map<String, QuoteModel> migrated = <String, QuoteModel>{};
+      for (final String id in legacyIds) {
+        QuoteModel? match;
+        for (final QuoteModel quote in _quotes) {
+          if (quote.storageId == id) {
+            match = quote;
+            break;
+          }
+        }
+        if (match != null) {
+          migrated[id] = match;
+        }
+      }
+      if (migrated.isNotEmpty) {
+        _favoriteQuotes = migrated;
+      }
+      await _persistFavorites();
+      await sharedPreferences.remove(_legacyFavoriteIdsKey);
+    }
+  }
+
+  Future<void> _persistQuotes() async {
+    if (_quotes.isEmpty) {
+      await sharedPreferences.remove(_quotesCacheKey);
+      return;
+    }
+    final encoded =
+        jsonEncode(_quotes.map((quote) => quote.toJson()).toList());
+    await sharedPreferences.setString(_quotesCacheKey, encoded);
+  }
+
+  Future<void> _persistQuoteOfDay() async {
+    if (_quoteOfDay == null) {
+      await sharedPreferences.remove(_quoteOfDayKey);
+      return;
+    }
     await sharedPreferences.setString(
-      _lastQuoteDayKey,
-      dateHelper.dayKey(),
+      _quoteOfDayKey,
+      jsonEncode(_quoteOfDay!.toJson()),
     );
   }
 
   Future<void> _persistFavorites() async {
-    await sharedPreferences.setStringList(
-      _favoritesKey,
-      _favoriteIds.toList(),
+    if (_favoriteQuotes.isEmpty) {
+      await sharedPreferences.remove(_favoritesKey);
+      return;
+    }
+    final encoded = jsonEncode(
+      _favoriteQuotes.values.map((quote) => quote.toJson()).toList(),
     );
+    await sharedPreferences.setString(_favoritesKey, encoded);
+  }
+
+  Future<void> _persistCurrentIndex() async {
+    await sharedPreferences.setInt(_currentIndexKey, _currentIndex);
+  }
+
+  void _ensureCurrentIndexBounds() {
+    if (_quotes.isEmpty) {
+      _currentIndex = 0;
+      return;
+    }
+    if (_currentIndex >= _quotes.length) {
+      _currentIndex = _quotes.length - 1;
+    }
   }
 
   void _setLoading(bool value) {
+    if (_isLoading == value) {
+      return;
+    }
     _isLoading = value;
     notifyListeners();
   }
 }
-
