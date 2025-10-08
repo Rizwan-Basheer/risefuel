@@ -63,7 +63,7 @@ class AboutScreen extends StatelessWidget {
         const SizedBox(height: 12),
         _AboutLinkTile(
           label: 'GitHub',
-          value: 'github.com/risefuel',
+          value: 'github.com/Rizwan-Basheer/risefuel',
           icon: Icons.code,
         ),
         _AboutLinkTile(
